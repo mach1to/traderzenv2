@@ -19,60 +19,91 @@ const safeStorage = {
 };
 
 /* ========================================================
-   TRADERZEN ACCOUNTS CONFIGURATION
-   Add your username, password, and Web App URL here.
-   This easily links your credentials to your Cloud backend
-   so you do not need to paste the link in Incognito tabs.
+   TRADERZEN FIREBASE CONFIGURATION
    ======================================================== */
-const ACCOUNTS = {
-    "machu": {
-        password: "shrek",
-        // Puta your Google Apps Script Web App URL below:
-        url: "https://script.google.com/macros/s/AKfycbyQGZYwUUN9eJTM7CG6fTXriyRP3OT2mOF5ctiXMujdwPKxyPJnKlaKw1GJWg1n1lWq/exec"
-    }
+// REPLACE WITH YOUR FIREBASE CONFIGURATION OBJECT FROM THE FIREBASE CONSOLE
+// Make sure to enable Authentication (Google Sign-In) and Firestore Database
+const firebaseConfig = {
+    apiKey: "YOUR_API_KEY",
+    authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
+    projectId: "YOUR_PROJECT_ID",
+    storageBucket: "YOUR_PROJECT_ID.appspot.com",
+    messagingSenderId: "SENDER_ID",
+    appId: "APP_ID"
 };
 
+// Initialize Firebase App
+let auth, db;
+try {
+    firebase.initializeApp(firebaseConfig);
+    auth = firebase.auth();
+    db = firebase.firestore();
+} catch (error) {
+    console.error("Firebase initialization failed:", error);
+}
+
 document.addEventListener('DOMContentLoaded', () => {
-    // --- LOGIN & URL MAPPING LOGIC ---
+    // --- FIREBASE AUTHENTICATION LOGIC ---
     const loginOverlay = document.getElementById('login-overlay');
-    const loginForm = document.getElementById('login-form');
+    const googleLoginBtn = document.getElementById('google-login-btn');
     const loginError = document.getElementById('login-error');
+    const userProfileDisplay = document.getElementById('user-profile-display');
+    const userNameSpan = document.getElementById('user-name');
+    const userAvatarImg = document.getElementById('user-avatar');
+    const navLogout = document.getElementById('nav-logout');
 
-    const isLoggedIn = safeStorage.getItem('traderZenLoggedIn');
-    if (!isLoggedIn) {
-        if (loginOverlay) loginOverlay.style.display = 'flex';
-    } else {
-        if (loginOverlay) loginOverlay.style.display = 'none';
-        // Auto-refresh the URL from code if they are already logged in
-        const user = safeStorage.getItem('traderZenUser');
-        if (user && ACCOUNTS[user] && ACCOUNTS[user].url) {
-            safeStorage.setItem('traderZenSheetsUrl', ACCOUNTS[user].url);
-        }
-    }
-
-    if (loginForm) {
-        loginForm.addEventListener('submit', (e) => {
-            e.preventDefault();
-            const user = document.getElementById('login-username').value.trim().toLowerCase();
-            const pass = document.getElementById('login-password').value.trim();
-
-            if (ACCOUNTS[user] && ACCOUNTS[user].password === pass) {
-                safeStorage.setItem('traderZenLoggedIn', 'true');
-                safeStorage.setItem('traderZenUser', user);
-                if (ACCOUNTS[user].url) {
-                    safeStorage.setItem('traderZenSheetsUrl', ACCOUNTS[user].url);
+    if (auth) {
+        auth.onAuthStateChanged((user) => {
+            if (user) {
+                // User is signed in
+                if (loginOverlay) loginOverlay.style.display = 'none';
+                if (userProfileDisplay) {
+                    userProfileDisplay.style.display = 'block';
+                    userNameSpan.textContent = user.displayName || user.email;
+                    if (user.photoURL) userAvatarImg.src = user.photoURL;
                 }
-                loginError.style.display = 'none';
-                loginOverlay.style.display = 'none';
+                if (navLogout) navLogout.style.display = 'flex';
+                
+                safeStorage.setItem('traderZenLoggedIn', 'true');
+                safeStorage.setItem('traderZenUser', user.uid);
 
-                // Trigger sync immediately now that we have the URL
                 if (typeof window.loadSessionsToDashboard === 'function') {
                     window.loadSessionsToDashboard();
                 }
             } else {
-                loginError.style.display = 'block';
+                // User is signed out
+                if (loginOverlay) loginOverlay.style.display = 'flex';
+                if (userProfileDisplay) userProfileDisplay.style.display = 'none';
+                if (navLogout) navLogout.style.display = 'none';
+                
+                safeStorage.removeItem('traderZenLoggedIn');
+                safeStorage.removeItem('traderZenUser');
             }
         });
+
+        if (googleLoginBtn) {
+            googleLoginBtn.addEventListener('click', () => {
+                const provider = new firebase.auth.GoogleAuthProvider();
+                auth.signInWithPopup(provider).catch((error) => {
+                    console.error("Auth Error:", error);
+                    loginError.textContent = error.message;
+                    loginError.style.display = 'block';
+                });
+            });
+        }
+
+        if (navLogout) {
+            navLogout.addEventListener('click', (e) => {
+                e.preventDefault();
+                auth.signOut().then(() => {
+                    // Clear local cache on logout
+                    safeStorage.removeItem('traderZenSessions');
+                    const sessionListContainer = document.getElementById('session-list');
+                    if(sessionListContainer) sessionListContainer.innerHTML = '';
+                    if (typeof switchView === 'function') switchView('dashboard');
+                });
+            });
+        }
     }
 
     // Initialize Lucide Icons
@@ -249,7 +280,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const formActions = document.getElementById('form-actions-container');
 
     if (form) {
-        form.addEventListener('submit', (e) => {
+        form.addEventListener('submit', async (e) => {
             e.preventDefault();
 
             // --- GATHER FORM DATA ---
@@ -279,38 +310,45 @@ document.addEventListener('DOMContentLoaded', () => {
             const data = { preMarketMoods, energy, stress, setupType, setupQuality, emotions, confirmations, rules, didWell, mistake, emotionActions, goodTrade, outcome };
             const feedback = generateAICoachFeedback(data);
 
-            // --- SAVE/UPDATE IN LOCALSTORAGE ---
+            // --- SAVE/UPDATE IN FIREBASE & LOCAL CACHE ---
             const editingId = form.dataset.editingId;
-            let currentSessionId = editingId;
+            let currentSessionId = editingId || Date.now().toString();
+            
+            const sessionData = {
+                id: currentSessionId,
+                date: undefined, // to be set
+                formInputs: data,
+                aiFeedback: feedback
+            };
+
+            // Update local cache optimistically
             let savedSessions = [];
             try {
                 savedSessions = JSON.parse(safeStorage.getItem('traderZenSessions') || '[]');
-            } catch (e) { console.error(e); }
+            } catch (e) {}
 
             if (editingId) {
-                // Update existing
                 const index = savedSessions.findIndex(s => s.id === editingId);
                 if (index !== -1) {
-                    savedSessions[index].formInputs = data;
-                    savedSessions[index].aiFeedback = feedback;
+                    sessionData.date = savedSessions[index].date; // preserve date
+                    savedSessions[index] = sessionData;
+                } else {
+                    sessionData.date = new Date().toISOString();
                 }
                 delete form.dataset.editingId;
             } else {
-                // Create new
-                currentSessionId = Date.now().toString();
-                const sessionData = {
-                    id: currentSessionId,
-                    date: new Date().toISOString(),
-                    formInputs: data,
-                    aiFeedback: feedback
-                };
+                sessionData.date = new Date().toISOString();
                 savedSessions.unshift(sessionData);
             }
+            safeStorage.setItem('traderZenSessions', JSON.stringify(savedSessions));
 
-            try {
-                safeStorage.setItem('traderZenSessions', JSON.stringify(savedSessions));
-            } catch (err) {
-                console.error("Storage error:", err);
+            // Save to Firestore
+            if (auth && auth.currentUser) {
+                try {
+                    await db.collection('users').doc(auth.currentUser.uid).collection('sessions').doc(currentSessionId).set(sessionData, { merge: true });
+                } catch (err) {
+                    console.error("Error saving to Firestore:", err);
+                }
             }
 
             // --- UI FEEDBACK ---
@@ -680,19 +718,27 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        const url = safeStorage.getItem('traderZenSheetsUrl');
-        if (url && !sessionListContainer.dataset.syncing) {
-            sessionListContainer.dataset.syncing = "true";
+        // Fetch from Firestore
+        if (auth && auth.currentUser) {
             sessionListContainer.innerHTML = `
                 <div style="text-align: center; padding: 3rem; color: var(--text-secondary);">
                     <i data-lucide="loader-2" class="spin" style="width: 48px; height: 48px; opacity: 0.5; margin-bottom: 1rem;"></i>
-                    <h3>Syncing from Google Sheets...</h3>
+                    <h3>Loading your sessions...</h3>
                 </div>
             `;
             lucide.createIcons();
-
-            await window.syncFromGoogleSheets();
-            delete sessionListContainer.dataset.syncing;
+            
+            try {
+                const snapshot = await db.collection('users').doc(auth.currentUser.uid).collection('sessions').get();
+                let fetchedSessions = [];
+                snapshot.forEach(doc => fetchedSessions.push(doc.data()));
+                
+                // Sort by date descending
+                fetchedSessions.sort((a, b) => new Date(b.date) - new Date(a.date));
+                safeStorage.setItem('traderZenSessions', JSON.stringify(fetchedSessions));
+            } catch (err) {
+                console.error("Error fetching sessions from Firestore:", err);
+            }
         }
 
         let savedSessions = [];
@@ -1100,13 +1146,25 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    async function executeDelete(id) {
+        let savedSessions = JSON.parse(safeStorage.getItem('traderZenSessions') || '[]');
+        savedSessions = savedSessions.filter(s => s.id !== id);
+        safeStorage.setItem('traderZenSessions', JSON.stringify(savedSessions));
+        
+        if (auth && auth.currentUser) {
+            try {
+                await db.collection('users').doc(auth.currentUser.uid).collection('sessions').doc(id).delete();
+            } catch (err) {
+                console.error("Error deleting from Firestore:", err);
+            }
+        }
+        window.loadSessionsToDashboard();
+    }
+
     if (confirmDeleteBtn) {
-        confirmDeleteBtn.addEventListener('click', () => {
+        confirmDeleteBtn.addEventListener('click', async () => {
             if (sessionToDelete) {
-                let savedSessions = JSON.parse(safeStorage.getItem('traderZenSessions') || '[]');
-                savedSessions = savedSessions.filter(s => s.id !== sessionToDelete);
-                safeStorage.setItem('traderZenSessions', JSON.stringify(savedSessions));
-                window.loadSessionsToDashboard();
+                await executeDelete(sessionToDelete);
             }
             if (deleteModal) deleteModal.style.display = 'none';
             sessionToDelete = null;
@@ -1114,7 +1172,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // Delete Session feature (Now uses custom modal)
-    window.deleteSession = function (id) {
+    window.deleteSession = async function (id) {
         console.log("Delete session triggered for ID:", id);
         sessionToDelete = id;
         const modal = document.getElementById('delete-modal');
@@ -1126,10 +1184,7 @@ document.addEventListener('DOMContentLoaded', () => {
             console.error("Critical Error: Delete modal element not found in DOM");
             // Fallback to generic confirm if modal fails
             if (confirm("Are you sure you want to delete this session?")) {
-                let savedSessions = JSON.parse(safeStorage.getItem('traderZenSessions') || '[]');
-                savedSessions = savedSessions.filter(s => s.id !== id);
-                safeStorage.setItem('traderZenSessions', JSON.stringify(savedSessions));
-                window.loadSessionsToDashboard();
+                await executeDelete(id);
             }
         }
     };
